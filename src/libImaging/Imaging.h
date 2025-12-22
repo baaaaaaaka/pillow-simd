@@ -606,6 +606,8 @@ ImagingPcxEncode(Imaging im, ImagingCodecState state, UINT8 *buffer, int bytes);
 extern int
 ImagingRawDecode(Imaging im, ImagingCodecState state, UINT8 *buffer, Py_ssize_t bytes);
 extern int
+ImagingRawPartialDecode(Imaging im, ImagingCodecState state, UINT8 *buffer, Py_ssize_t bytes);
+extern int
 ImagingRawEncode(Imaging im, ImagingCodecState state, UINT8 *buffer, int bytes);
 extern int
 ImagingSgiRleDecode(

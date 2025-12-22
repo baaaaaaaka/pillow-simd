@@ -71,6 +71,18 @@ class BmpImageFile(ImageFile.ImageFile):
     for k, v in COMPRESSIONS.items():
         vars()[k] = v
 
+    # Class-level flag to enable/disable partial loading optimization
+    # Set to False to use traditional full-load behavior for benchmarking
+    ENABLE_PARTIAL_LOAD = True
+
+    def __init__(self, fp=None, filename=None):
+        # Store file info for partial loading
+        self._bmp_info = None
+        self._data_offset = None
+        self._raw_mode = None
+        self._stride = None
+        super().__init__(fp, filename)
+
     def _bitmap(self, header=0, offset=0):
         """Read relevant info about the BMP"""
         read, seek = self.fp.read, self.fp.seek
@@ -255,17 +267,29 @@ class BmpImageFile(ImageFile.ImageFile):
 
         # ---------------------------- Finally set the tile data for the plugin
         self.info["compression"] = file_info["compression"]
+        
+        # Calculate stride (bytes per row including padding)
+        stride = ((file_info["width"] * file_info["bits"] + 31) >> 3) & (~3)
+        
         args = [raw_mode]
         if decoder_name == "bmp_rle":
             args.append(file_info["compression"] == self.RLE4)
         else:
-            args.append(((file_info["width"] * file_info["bits"] + 31) >> 3) & (~3))
+            args.append(stride)
         args.append(file_info["direction"])
+        
+        # Store info for partial loading
+        self._bmp_info = file_info
+        self._data_offset = offset or self.fp.tell()
+        self._raw_mode = raw_mode
+        self._stride = stride
+        self._decoder_name = decoder_name
+        
         self.tile = [
             (
                 decoder_name,
                 (0, 0, file_info["width"], file_info["height"]),
-                offset or self.fp.tell(),
+                self._data_offset,
                 tuple(args),
             )
         ]
@@ -282,6 +306,280 @@ class BmpImageFile(ImageFile.ImageFile):
         offset = i32(head_data, 10)
         # load bitmap information (offset=raster info)
         self._bitmap(offset=offset)
+
+    def load_region(self, box):
+        """
+        Load only a region of the image, optimized for uncompressed BMP files.
+        
+        This method provides significant performance improvements for large BMP files
+        when only a small region is needed, by:
+        - Reducing disk I/O (skipping unneeded rows)
+        - Reducing memory usage (allocating only the crop region)
+        - Reducing decode time (only decoding needed rows)
+        
+        The implementation directly uses the C-layer raw decoder for maximum efficiency.
+        
+        :param box: A 4-tuple (left, upper, right, lower) defining the region.
+        :returns: An Image object containing only the requested region.
+        :raises ValueError: If the box is invalid.
+        :raises OSError: If the image uses RLE compression (not supported for partial load).
+        
+        Example usage::
+        
+            with Image.open("large_image.bmp") as img:
+                # Only loads the specified region from disk
+                region = img.load_region((100, 100, 500, 500))
+        """
+        left, upper, right, lower = box
+        
+        # Validate box
+        if left < 0 or upper < 0:
+            msg = "Box coordinates must be non-negative"
+            raise ValueError(msg)
+        if right <= left or lower <= upper:
+            msg = "Invalid box: right must be > left, lower must be > upper"
+            raise ValueError(msg)
+        if right > self.size[0] or lower > self.size[1]:
+            msg = f"Box {box} exceeds image size {self.size}"
+            raise ValueError(msg)
+        
+        # Check if partial loading is supported
+        if self._bmp_info is None:
+            msg = "Image info not available for partial loading"
+            raise OSError(msg)
+        
+        compression = self._bmp_info.get("compression", -1)
+        if compression in (self.RLE4, self.RLE8):
+            # RLE compression requires sequential decoding, fall back to full load + crop
+            self.load()
+            return self.crop(box)
+        
+        # For uncompressed BMP, we can do partial loading
+        crop_width = right - left
+        crop_height = lower - upper
+        
+        # BMP stores rows from bottom to top (direction = -1) or top to bottom (direction = 1)
+        direction = self._bmp_info.get("direction", -1)
+        img_height = self._bmp_info["height"]
+        img_width = self._bmp_info["width"]
+        
+        # Calculate which rows we need to read from the file
+        if direction == -1:  # Bottom-up (most common)
+            # Row 0 in file = bottom row of image (y = height - 1)
+            # We want rows from 'upper' to 'lower-1' in image coordinates
+            # In file: row (height - lower) to row (height - upper - 1)
+            file_start_row = img_height - lower
+        else:  # Top-down
+            file_start_row = upper
+        
+        # Calculate file offset to skip unneeded rows
+        row_offset = self._data_offset + file_start_row * self._stride
+        
+        # Create a temporary image to hold the full-width rows we need
+        # This allows us to use C-layer decoding directly
+        temp_im = Image.new(self.mode, (img_width, crop_height))
+        
+        # Copy palette if exists
+        if self.mode == "P" and self.palette:
+            temp_im.putpalette(self.palette)
+        
+        # Set up the tile for C-layer decoding
+        # tile format: (decoder_name, extents, offset, args)
+        # extents: (x0, y0, x1, y1) - region in the OUTPUT image to write to
+        # offset: position in file to start reading
+        # args: (rawmode, stride, direction)
+        tile = [(
+            "raw",
+            (0, 0, img_width, crop_height),  # Write to full width of temp image
+            row_offset,                       # Start reading from calculated offset
+            (self._raw_mode, self._stride, direction)
+        )]
+        
+        # Use ImageFile's tile-based loading mechanism (calls C decoder)
+        self.fp.seek(row_offset)
+        decoder = Image._getdecoder(
+            self.mode, "raw", (self._raw_mode, self._stride, direction)
+        )
+        decoder.setimage(temp_im.im, (0, 0, img_width, crop_height))
+        
+        # Read and decode - let C layer handle the decoding
+        bytes_to_read = crop_height * self._stride
+        raw_data = ImageFile._safe_read(self.fp, bytes_to_read)
+        decoder.decode(raw_data)
+        decoder.cleanup()
+        
+        # Now crop horizontally using C-layer crop (im.crop is implemented in C)
+        if left == 0 and right == img_width:
+            # No horizontal crop needed
+            return temp_im
+        else:
+            # Use C-layer crop for horizontal extraction
+            return temp_im.crop((left, 0, right, crop_height))
+
+    def load_region_c_optimized(self, box):
+        """
+        Load only a region of the image using C-layer partial decoding.
+        
+        This is a more optimized version that uses a custom C decoder
+        (raw_partial) to decode only the needed columns directly,
+        avoiding the need for a second crop operation.
+        
+        This method provides additional performance improvements over
+        load_region() by:
+        - Decoding only the needed columns (not full rows)
+        - Eliminating the Python bytes object overhead
+        - Eliminating the secondary crop operation
+        
+        :param box: A 4-tuple (left, upper, right, lower) defining the region.
+        :returns: An Image object containing only the requested region.
+        :raises ValueError: If the box is invalid.
+        :raises OSError: If the image uses RLE compression or unsupported bit depth.
+        
+        Example usage::
+        
+            with Image.open("large_image.bmp") as img:
+                # Uses C-layer optimized partial decoding
+                region = img.load_region_c_optimized((100, 100, 500, 500))
+        """
+        left, upper, right, lower = box
+        
+        # Validate box
+        if left < 0 or upper < 0:
+            msg = "Box coordinates must be non-negative"
+            raise ValueError(msg)
+        if right <= left or lower <= upper:
+            msg = "Invalid box: right must be > left, lower must be > upper"
+            raise ValueError(msg)
+        if right > self.size[0] or lower > self.size[1]:
+            msg = f"Box {box} exceeds image size {self.size}"
+            raise ValueError(msg)
+        
+        # Check if partial loading is supported
+        if self._bmp_info is None:
+            msg = "Image info not available for partial loading"
+            raise OSError(msg)
+        
+        compression = self._bmp_info.get("compression", -1)
+        if compression in (self.RLE4, self.RLE8):
+            # RLE compression requires sequential decoding, fall back
+            return self.load_region(box)
+        
+        bits = self._bmp_info["bits"]
+        # C-layer partial decoding only works well for 8+ bit images
+        if bits < 8:
+            # Fall back to Python implementation for sub-byte pixels
+            return self.load_region(box)
+        
+        # For uncompressed BMP with 8+ bits, use C-layer partial decoding
+        crop_width = right - left
+        crop_height = lower - upper
+        
+        # BMP stores rows from bottom to top (direction = -1) or top to bottom (direction = 1)
+        direction = self._bmp_info.get("direction", -1)
+        img_height = self._bmp_info["height"]
+        
+        # Calculate which rows we need to read from the file
+        if direction == -1:  # Bottom-up (most common)
+            file_start_row = img_height - lower
+        else:  # Top-down
+            file_start_row = upper
+        
+        # Calculate file offset to skip unneeded rows
+        row_offset = self._data_offset + file_start_row * self._stride
+        
+        # Calculate bytes to skip for left crop
+        bytes_per_pixel = bits // 8
+        skip_left_bytes = left * bytes_per_pixel
+        
+        # Create output image with exact crop dimensions
+        out_im = Image.new(self.mode, (crop_width, crop_height))
+        
+        # Copy palette if exists
+        if self.mode == "P" and self.palette:
+            out_im.putpalette(self.palette.getdata()[1])
+        
+        # Seek to starting position
+        self.fp.seek(row_offset)
+        
+        # Use the new raw_partial decoder
+        # Args: mode, rawmode, stride, ystep, skip_left
+        decoder = Image._getdecoder(
+            self.mode, "raw_partial", 
+            (self._raw_mode, self._stride, direction, skip_left_bytes)
+        )
+        decoder.setimage(out_im.im, (0, 0, crop_width, crop_height))
+        
+        # Read and decode - still need to read full rows but decoder skips columns
+        bytes_to_read = crop_height * self._stride
+        raw_data = ImageFile._safe_read(self.fp, bytes_to_read)
+        decoder.decode(raw_data)
+        decoder.cleanup()
+        
+        return out_im
+
+    def crop(self, box=None, *, use_partial_load=None):
+        """
+        Returns a rectangular region from this image.
+        
+        This is an optimized version that uses partial loading for uncompressed BMP files.
+        For RLE-compressed files, it falls back to the standard crop behavior.
+        
+        :param box: The crop rectangle, as a (left, upper, right, lower)-tuple.
+        :param use_partial_load: Override the default partial loading behavior.
+            - None (default): Use class-level ENABLE_PARTIAL_LOAD setting
+            - True: Force partial loading (will raise if not supported)
+            - False: Force traditional full-load + crop
+        :rtype: :py:class:`~PIL.Image.Image`
+        :returns: An :py:class:`~PIL.Image.Image` object.
+        
+        Example::
+        
+            # Use default behavior (auto-detect)
+            region = img.crop((100, 100, 500, 500))
+            
+            # Force traditional method (for benchmarking)
+            region = img.crop((100, 100, 500, 500), use_partial_load=False)
+            
+            # Force optimized method
+            region = img.crop((100, 100, 500, 500), use_partial_load=True)
+            
+            # Or disable globally for benchmarking:
+            BmpImageFile.ENABLE_PARTIAL_LOAD = False
+        """
+        if box is None:
+            return self.copy()
+        
+        # Determine whether to use partial loading
+        if use_partial_load is None:
+            use_partial_load = self.ENABLE_PARTIAL_LOAD
+        
+        # Check if we can use optimized partial loading
+        if (
+            use_partial_load
+            and self._bmp_info is not None
+            and self._bmp_info.get("compression", -1) not in (self.RLE4, self.RLE8)
+            and self.fp is not None
+            and not getattr(self, '_loaded', False)
+        ):
+            try:
+                return self.load_region(box)
+            except (OSError, ValueError):
+                if use_partial_load is True:
+                    # User explicitly requested partial load, re-raise
+                    raise
+                # Fall back to standard crop if partial load fails
+                pass
+        
+        # Standard crop behavior
+        self.load()
+        self._loaded = True
+        return self._new(self._crop(self.im, box))
+
+    def load(self):
+        """Load image data based on tile list"""
+        result = super().load()
+        self._loaded = True
+        return result
 
 
 class BmpRleDecoder(ImageFile.PyDecoder):

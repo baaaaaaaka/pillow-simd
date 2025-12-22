@@ -38,6 +38,7 @@
 #include "libImaging/Bcn.h"
 #include "libImaging/Gif.h"
 #include "libImaging/Raw.h"
+#include "libImaging/RawPartial.h"
 #include "libImaging/Sgi.h"
 
 /* -------------------------------------------------------------------- */
@@ -641,6 +642,44 @@ PyImaging_RawDecoderNew(PyObject *self, PyObject *args) {
     decoder->state.ystep = ystep;
 
     ((RAWSTATE *)decoder->state.context)->stride = stride;
+
+    return (PyObject *)decoder;
+}
+
+/* -------------------------------------------------------------------- */
+/* RAW PARTIAL (with column skip support for partial loading)           */
+/* -------------------------------------------------------------------- */
+
+PyObject *
+PyImaging_RawPartialDecoderNew(PyObject *self, PyObject *args) {
+    ImagingDecoderObject *decoder;
+
+    char *mode;
+    char *rawmode;
+    int stride = 0;
+    int ystep = 1;
+    int skip_left = 0;
+    
+    /* Args: mode, rawmode, stride, ystep, skip_left */
+    if (!PyArg_ParseTuple(args, "ss|iii", &mode, &rawmode, &stride, &ystep, &skip_left)) {
+        return NULL;
+    }
+
+    decoder = PyImaging_DecoderNew(sizeof(RAWPARTIALSTATE));
+    if (decoder == NULL) {
+        return NULL;
+    }
+
+    if (get_unpacker(decoder, mode, rawmode) < 0) {
+        return NULL;
+    }
+
+    decoder->decode = ImagingRawPartialDecode;
+
+    decoder->state.ystep = ystep;
+
+    ((RAWPARTIALSTATE *)decoder->state.context)->stride = stride;
+    ((RAWPARTIALSTATE *)decoder->state.context)->skip_left = skip_left;
 
     return (PyObject *)decoder;
 }

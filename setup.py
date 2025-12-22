@@ -104,6 +104,7 @@ _LIB_IMAGING = (
     "Point",
     "RankFilter",
     "RawDecode",
+    "RawPartialDecode",
     "RawEncode",
     "Storage",
     "SgiRleDecode",

@@ -4051,6 +4051,8 @@ PyImaging_PcxDecoderNew(PyObject *self, PyObject *args);
 extern PyObject *
 PyImaging_RawDecoderNew(PyObject *self, PyObject *args);
 extern PyObject *
+PyImaging_RawPartialDecoderNew(PyObject *self, PyObject *args);
+extern PyObject *
 PyImaging_SgiRleDecoderNew(PyObject *self, PyObject *args);
 extern PyObject *
 PyImaging_SunRleDecoderNew(PyObject *self, PyObject *args);
@@ -4154,6 +4156,7 @@ static PyMethodDef functions[] = {
     {"pcx_decoder", (PyCFunction)PyImaging_PcxDecoderNew, METH_VARARGS},
     {"pcx_encoder", (PyCFunction)PyImaging_PcxEncoderNew, METH_VARARGS},
     {"raw_decoder", (PyCFunction)PyImaging_RawDecoderNew, METH_VARARGS},
+    {"raw_partial_decoder", (PyCFunction)PyImaging_RawPartialDecoderNew, METH_VARARGS},
     {"raw_encoder", (PyCFunction)PyImaging_RawEncoderNew, METH_VARARGS},
     {"sgi_rle_decoder", (PyCFunction)PyImaging_SgiRleDecoderNew, METH_VARARGS},
     {"sun_rle_decoder", (PyCFunction)PyImaging_SunRleDecoderNew, METH_VARARGS},

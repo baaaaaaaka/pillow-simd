@@ -496,7 +496,7 @@ class BmpImageFile(ImageFile.ImageFile):
         
         # Copy palette if exists
         if self.mode == "P" and self.palette:
-            out_im.putpalette(self.palette.getdata()[1])
+            out_im.putpalette(self.palette)
         
         # Seek to starting position
         self.fp.seek(row_offset)
@@ -562,7 +562,8 @@ class BmpImageFile(ImageFile.ImageFile):
             and not getattr(self, '_loaded', False)
         ):
             try:
-                return self.load_region(box)
+                # Use C-optimized version for best performance
+                return self.load_region_c_optimized(box)
             except (OSError, ValueError):
                 if use_partial_load is True:
                     # User explicitly requested partial load, re-raise

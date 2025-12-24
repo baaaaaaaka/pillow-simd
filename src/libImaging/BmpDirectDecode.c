@@ -37,24 +37,36 @@
 #define MMAP_AVAILABLE 0
 #endif
 
-/* Runtime check for mmap - disabled by default for network filesystem compatibility
- * Set PILLOW_USE_MMAP=1 to enable mmap (faster on local filesystems)
- * mmap can be slower on Lustre, NFS, CIFS due to page fault latency */
-static int use_mmap_checked = 0;
-static int use_mmap_value = 0;  /* Default: OFF (fread) for Lustre/NFS compatibility */
+/* I/O mode selection for different filesystem types
+ * 
+ * Environment variable: PILLOW_IO_MODE
+ *   - "local"   : Use mmap for zero-copy (best for local SSD/NVMe)
+ *   - "network" : Use fread with optimized buffering (best for Lustre/NFS/CIFS)
+ *   - unset     : Default to "network" for broader compatibility
+ * 
+ * Network mode optimizations:
+ *   - Single header read (138 bytes) instead of multiple small reads
+ *   - Sequential fread instead of mmap to avoid page fault latency
+ *   - Better compatibility with distributed filesystems
+ */
+static int io_mode_checked = 0;
+static int use_local_mode = 0;  /* Default: network mode (fread) */
 
 static int should_use_mmap(void) {
 #if !MMAP_AVAILABLE
     return 0;
 #else
-    if (!use_mmap_checked) {
-        const char* env = getenv("PILLOW_USE_MMAP");
-        if (env && (env[0] == '1' || env[0] == 'y' || env[0] == 'Y')) {
-            use_mmap_value = 1;  /* Enable mmap only if explicitly requested */
+    if (!io_mode_checked) {
+        const char* env = getenv("PILLOW_IO_MODE");
+        if (env) {
+            if (strcmp(env, "local") == 0 || strcmp(env, "LOCAL") == 0) {
+                use_local_mode = 1;
+            }
+            /* "network" or anything else stays at 0 */
         }
-        use_mmap_checked = 1;
+        io_mode_checked = 1;
     }
-    return use_mmap_value;
+    return use_local_mode;
 #endif
 }
 
@@ -109,6 +121,12 @@ typedef struct {
     
     /* For BITFIELDS */
     uint32_t r_mask, g_mask, b_mask, a_mask;
+    
+    /* For palette (8-bit indexed color) */
+    int has_palette;
+    float palette_r[256];  /* Pre-converted to float for fast SIMD lookup */
+    float palette_g[256];
+    float palette_b[256];
 } BmpInfo;
 
 /* Precomputed normalization factor */
@@ -117,16 +135,21 @@ static const float INV_255 = 1.0f / 255.0f;
 /**
  * Parse BMP header and extract relevant info.
  * Returns 0 on success, negative error code on failure.
+ * 
+ * OPTIMIZATION FOR NETWORK FS (Lustre/NFS):
+ * Read entire header in ONE fread() call to minimize network round-trips.
+ * BMP headers are at most 138 bytes (14 file header + 124 max DIB header).
  */
 static int
 parse_bmp_header(FILE* fp, BmpInfo* info) {
-    uint8_t header[138];  /* Max header size we need */
+    uint8_t header[138];  /* Max header size: 14 (file) + 124 (BITMAPV5HEADER) */
     size_t bytes_read;
     uint32_t header_size;
     int32_t height_raw;
     
-    /* Read file header (14 bytes) + first 4 bytes of DIB header */
-    bytes_read = fread(header, 1, 18, fp);
+    /* OPTIMIZATION: Single read for entire header (reduces network round-trips)
+     * This is crucial for Lustre/NFS where each fread() may incur ~100-500μs RTT */
+    bytes_read = fread(header, 1, 138, fp);
     if (bytes_read < 18) {
         return ERR_INVALID_HEADER;
     }
@@ -142,14 +165,9 @@ parse_bmp_header(FILE* fp, BmpInfo* info) {
     /* Get DIB header size */
     header_size = READ_U32_LE(header + 14);
     
-    /* Read rest of DIB header */
-    if (header_size > 4) {
-        size_t remaining = header_size - 4;
-        if (remaining > 120) remaining = 120;  /* Cap at our buffer size */
-        bytes_read = fread(header + 18, 1, remaining, fp);
-        if (bytes_read < remaining) {
-            return ERR_INVALID_HEADER;
-        }
+    /* Validate we read enough for the header */
+    if (bytes_read < 14 + header_size && header_size <= 124) {
+        return ERR_INVALID_HEADER;
     }
     
     /* Parse based on header type */
@@ -196,10 +214,34 @@ parse_bmp_header(FILE* fp, BmpInfo* info) {
     info->bytes_per_pixel = (info->bits + 7) / 8;
     info->stride = ((info->width * info->bits + 31) / 32) * 4;
     
-    /* Determine channel count */
+    /* Determine channel count and handle palette */
+    info->has_palette = 0;
     switch (info->bits) {
         case 8:
             info->channels = 1;
+            /* 8-bit BMP has a palette - read it for indexed color support */
+            {
+                size_t palette_offset = 14 + header_size;
+                uint8_t palette_data[1024];  /* 256 entries × 4 bytes max */
+                size_t palette_entry_size = (header_size == 12) ? 3 : 4;
+                size_t palette_size = 256 * palette_entry_size;
+                
+                if (fseek(fp, palette_offset, SEEK_SET) != 0) {
+                    return ERR_READ;
+                }
+                if (fread(palette_data, 1, palette_size, fp) != palette_size) {
+                    return ERR_READ;
+                }
+                
+                /* Convert palette to float (keep as 0-255 values, scale applied later) */
+                for (int i = 0; i < 256; i++) {
+                    const uint8_t* entry = palette_data + i * palette_entry_size;
+                    info->palette_b[i] = (float)entry[0];
+                    info->palette_g[i] = (float)entry[1];
+                    info->palette_r[i] = (float)entry[2];
+                }
+                info->has_palette = 1;
+            }
             break;
         case 24:
             info->channels = 3;
@@ -297,10 +339,30 @@ parse_bmp_header_from_memory(const uint8_t* data, size_t data_size, BmpInfo* inf
     info->bytes_per_pixel = (info->bits + 7) / 8;
     info->stride = ((info->width * info->bits + 31) / 32) * 4;
     
-    /* Determine channel count */
+    /* Determine channel count and handle palette */
+    info->has_palette = 0;
     switch (info->bits) {
         case 8:
             info->channels = 1;
+            /* 8-bit BMP has a palette - read it directly from mapped memory */
+            {
+                size_t palette_offset = 14 + header_size;
+                size_t palette_entry_size = (header_size == 12) ? 3 : 4;
+                size_t palette_size = 256 * palette_entry_size;
+                
+                if (palette_offset + palette_size > data_size) {
+                    return ERR_INVALID_HEADER;
+                }
+                
+                const uint8_t* palette_data = data + palette_offset;
+                for (int i = 0; i < 256; i++) {
+                    const uint8_t* entry = palette_data + i * palette_entry_size;
+                    info->palette_b[i] = (float)entry[0];
+                    info->palette_g[i] = (float)entry[1];
+                    info->palette_r[i] = (float)entry[2];
+                }
+                info->has_palette = 1;
+            }
             break;
         case 24:
             info->channels = 3;
@@ -755,6 +817,125 @@ process_row_gray8_to_chw_f32(
 }
 
 /**
+ * Process a single row of 8-bit palette-indexed data to CHW float32 RGB.
+ * Uses AVX2 Gather instructions for parallel palette lookup on Skylake+.
+ * Falls back to scalar for older CPUs or remaining pixels.
+ * 
+ * Note: Palette values are pre-normalized to [0,1] in parse_bmp_header.
+ *       The 'scale' parameter is used for non-normalized output only.
+ */
+#ifdef __AVX2__
+static void
+process_row_palette8_to_chw_f32_avx2(
+    const uint8_t* __restrict src,
+    float* __restrict out_r,
+    float* __restrict out_g,
+    float* __restrict out_b,
+    int width,
+    const float* __restrict palette_r,
+    const float* __restrict palette_g,
+    const float* __restrict palette_b,
+    float scale  /* 1.0 for normalized, 255.0 for non-normalized */
+) {
+    int x = 0;
+    __m256 vscale = _mm256_set1_ps(scale);
+    
+    /* Process 8 pixels per iteration using AVX2 Gather */
+    for (; x <= width - 8; x += 8) {
+        /* Load 8 palette indices (8 bytes → 8 int32) */
+        __m128i idx8 = _mm_loadl_epi64((const __m128i*)(src + x));
+        __m256i idx32 = _mm256_cvtepu8_epi32(idx8);
+        
+        /* Parallel palette lookup using Gather (8 floats at once)
+         * _mm256_i32gather_ps(base, indices, scale):
+         *   result[i] = base[indices[i] * scale/4]
+         * scale=4 means indices are in units of floats */
+        __m256 r = _mm256_i32gather_ps(palette_r, idx32, 4);
+        __m256 g = _mm256_i32gather_ps(palette_g, idx32, 4);
+        __m256 b = _mm256_i32gather_ps(palette_b, idx32, 4);
+        
+        /* Apply scale (for non-normalized output) */
+        r = _mm256_mul_ps(r, vscale);
+        g = _mm256_mul_ps(g, vscale);
+        b = _mm256_mul_ps(b, vscale);
+        
+        /* Store results */
+        _mm256_storeu_ps(out_r + x, r);
+        _mm256_storeu_ps(out_g + x, g);
+        _mm256_storeu_ps(out_b + x, b);
+    }
+    
+    /* Handle remaining pixels (scalar) */
+    for (; x < width; x++) {
+        uint8_t idx = src[x];
+        out_r[x] = palette_r[idx] * scale;
+        out_g[x] = palette_g[idx] * scale;
+        out_b[x] = palette_b[idx] * scale;
+    }
+}
+#endif
+
+/* Scalar fallback for palette processing */
+static void
+process_row_palette8_to_chw_f32_scalar(
+    const uint8_t* __restrict src,
+    float* __restrict out_r,
+    float* __restrict out_g,
+    float* __restrict out_b,
+    int width,
+    const float* __restrict palette_r,
+    const float* __restrict palette_g,
+    const float* __restrict palette_b,
+    float scale
+) {
+    for (int x = 0; x < width; x++) {
+        uint8_t idx = src[x];
+        out_r[x] = palette_r[idx] * scale;
+        out_g[x] = palette_g[idx] * scale;
+        out_b[x] = palette_b[idx] * scale;
+    }
+}
+
+/* Dispatcher for palette processing */
+static void
+process_row_palette8_to_chw_f32(
+    const uint8_t* __restrict src,
+    float* __restrict out_r,
+    float* __restrict out_g,
+    float* __restrict out_b,
+    int width,
+    int64_t stride_x,
+    const float* __restrict palette_r,
+    const float* __restrict palette_g,
+    const float* __restrict palette_b,
+    float scale
+) {
+    /* For contiguous output, use optimized SIMD path */
+    if (stride_x == 1) {
+#ifdef __AVX2__
+        process_row_palette8_to_chw_f32_avx2(
+            src, out_r, out_g, out_b, width,
+            palette_r, palette_g, palette_b, scale
+        );
+        return;
+#endif
+        process_row_palette8_to_chw_f32_scalar(
+            src, out_r, out_g, out_b, width,
+            palette_r, palette_g, palette_b, scale
+        );
+        return;
+    }
+    
+    /* Non-contiguous output: scalar with stride */
+    for (int x = 0; x < width; x++) {
+        uint8_t idx = src[x];
+        out_r[x * stride_x] = palette_r[idx] * scale;
+        out_g[x * stride_x] = palette_g[idx] * scale;
+        out_b[x * stride_x] = palette_b[idx] * scale;
+    }
+}
+
+/**
  * Process all rows from a buffer - optimized version for bulk processing.
  * Handles both top-down and bottom-up BMPs by adjusting the read order.
  */
@@ -774,7 +955,11 @@ process_all_rows(
     int64_t stride_y,
     int64_t stride_x,
     float scale,
-    int drop_alpha
+    int drop_alpha,
+    int has_palette,
+    const float* palette_r,
+    const float* palette_g,
+    const float* palette_b
 ) {
     int out_row;
     
@@ -850,7 +1035,22 @@ process_all_rows(
                 break;
                 
             case 8:
-                if (out_channels >= 1) {
+                if (has_palette && out_channels >= 3) {
+                    /* 8-bit palette mode: use AVX2 Gather for fast lookup */
+                    process_row_palette8_to_chw_f32(
+                        src,
+                        dst_base,                    /* R */
+                        dst_base + stride_c,         /* G */
+                        dst_base + 2 * stride_c,     /* B */
+                        crop_width,
+                        stride_x,
+                        palette_r,
+                        palette_g,
+                        palette_b,
+                        scale
+                    );
+                } else if (out_channels >= 1) {
+                    /* 8-bit grayscale mode */
                     process_row_gray8_to_chw_f32(
                         src,
                         dst_base,
@@ -859,6 +1059,7 @@ process_all_rows(
                         scale
                     );
                     
+                    /* Duplicate to G and B channels if needed */
                     if (out_channels >= 3) {
                         int x;
                         for (x = 0; x < crop_width; x++) {
@@ -1010,7 +1211,11 @@ decode_crop_to_chw_f32(
             stride_y,
             stride_x,
             scale,
-            drop_alpha
+            drop_alpha,
+            info.has_palette,
+            info.palette_r,
+            info.palette_g,
+            info.palette_b
         );
         
         munmap(mapped, mapped_size);
@@ -1095,7 +1300,11 @@ decode_crop_to_chw_f32(
         stride_y,
         stride_x,
         scale,
-        drop_alpha
+        drop_alpha,
+        info.has_palette,
+        info.palette_r,
+        info.palette_g,
+        info.palette_b
     );
     
     free(bulk_buffer);

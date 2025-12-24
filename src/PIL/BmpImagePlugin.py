@@ -804,8 +804,31 @@ def decode_bmp_to_tensor(
     except ImportError:
         raise ImportError("PyTorch is required for decode_bmp_to_tensor")
     
-    from PIL import _imaging
+    import numpy as np
+    from PIL import _imaging, Image
     
+    # Try fast C path first (supports RGB, RGBA, Grayscale, and Palette with AVX2 Gather)
+    # Fallback to Pillow if unsupported format (e.g., RLE compression)
+    try:
+        return _decode_bmp_to_tensor_fast(
+            filename, box, out_tensor, normalize, drop_alpha, out_channels, torch, _imaging
+        )
+    except RuntimeError as e:
+        # Check if this is an "unsupported format" error that we can fallback from
+        # vs a genuine error (file not found, invalid crop) that should propagate
+        error_msg = str(e).lower()
+        if 'unsupported' in error_msg or 'compression' in error_msg:
+            # Fallback to slower but safer Pillow path for RLE, etc.
+            return _decode_bmp_to_tensor_fallback(
+                filename, box, out_tensor, normalize, drop_alpha, out_channels, torch, np
+            )
+        else:
+            # Re-raise other errors (file not found, invalid crop, etc.)
+            raise
+
+
+def _decode_bmp_to_tensor_fast(filename, box, out_tensor, normalize, drop_alpha, out_channels, torch, _imaging):
+    """Fast C-based decoding path."""
     # Get image info if needed
     if box is None or out_tensor is None:
         width, height, channels = _imaging.bmp_get_info(filename)
@@ -847,7 +870,7 @@ def decode_bmp_to_tensor(
     stride_y = out_tensor.stride(1)
     stride_x = out_tensor.stride(2)
     
-    # Call C function
+    # Call C function (may raise RuntimeError for unsupported formats)
     _imaging.bmp_decode_to_chw(
         filename,
         x0, y0, x1, y1,
@@ -859,6 +882,70 @@ def decode_bmp_to_tensor(
     )
     
     return out_tensor
+
+
+def _decode_bmp_to_tensor_fallback(filename, box, out_tensor, normalize, drop_alpha, out_channels, torch, np):
+    """Fallback path using Pillow for unsupported formats (RLE, etc.)."""
+    from PIL import Image
+    
+    with Image.open(filename) as img:
+        # Apply crop if specified
+        if box is not None:
+            img = img.crop(box)
+        
+        # Convert to RGB/RGBA if needed
+        if img.mode == 'P':
+            img = img.convert('RGBA' if 'transparency' in img.info else 'RGB')
+        elif img.mode == 'L':
+            pass  # Keep grayscale
+        elif img.mode not in ('RGB', 'RGBA'):
+            img = img.convert('RGB')
+        
+        # Convert to numpy array
+        arr = np.array(img, dtype=np.float32)
+        
+        # Normalize if requested
+        if normalize:
+            arr = arr / 255.0
+        
+        # Handle grayscale
+        if arr.ndim == 2:
+            arr = arr[:, :, np.newaxis]
+        
+        # Transpose to CHW
+        arr = arr.transpose(2, 0, 1)
+        
+        # Handle channels
+        if out_channels is None:
+            out_channels = 3 if drop_alpha else arr.shape[0]
+        
+        if drop_alpha and arr.shape[0] == 4:
+            arr = arr[:3]
+        
+        # Ensure correct number of channels
+        if arr.shape[0] < out_channels:
+            # Expand grayscale to RGB if needed
+            if arr.shape[0] == 1 and out_channels >= 3:
+                arr = np.repeat(arr, 3, axis=0)
+        elif arr.shape[0] > out_channels:
+            arr = arr[:out_channels]
+        
+        # Create or fill output tensor
+        if out_tensor is None:
+            return torch.from_numpy(arr.copy())
+        else:
+            # Validate and copy to existing tensor
+            if out_tensor.dim() != 3:
+                raise ValueError(f"out_tensor must be 3D, got {out_tensor.dim()}D")
+            if out_tensor.dtype != torch.float32:
+                raise ValueError(f"out_tensor must be float32, got {out_tensor.dtype}")
+            if out_tensor.device.type != 'cpu':
+                raise ValueError(f"out_tensor must be on CPU, got {out_tensor.device}")
+            
+            h, w = arr.shape[1], arr.shape[2]
+            c = min(arr.shape[0], out_tensor.shape[0])
+            out_tensor[:c, :h, :w] = torch.from_numpy(arr[:c])
+            return out_tensor
 
 
 def get_bmp_info(filename):

@@ -962,3 +962,95 @@ PyImaging_Jpeg2KDecoderNew(PyObject *self, PyObject *args) {
     return (PyObject *)decoder;
 }
 #endif /* HAVE_OPENJPEG */
+
+/* -------------------------------------------------------------------- */
+/* BMP Direct Decode to CHW Float32                                     */
+/* -------------------------------------------------------------------- */
+
+#include "libImaging/decode_api.h"
+
+PyObject *
+PyImaging_BmpDecodeToCHW(PyObject *self, PyObject *args) {
+    const char *filename;
+    int x0, y0, x1, y1;
+    int out_channels;
+    unsigned long long out_ptr;  /* Pointer as integer */
+    long long stride_c, stride_y, stride_x;
+    int normalize_01;
+    int drop_alpha;
+    int result;
+    
+    /* Parse arguments:
+     * filename, x0, y0, x1, y1, out_channels, out_ptr, stride_c, stride_y, stride_x, normalize, drop_alpha
+     */
+    if (!PyArg_ParseTuple(args, "siiiiiKLLLii",
+                          &filename,
+                          &x0, &y0, &x1, &y1,
+                          &out_channels,
+                          &out_ptr,
+                          &stride_c, &stride_y, &stride_x,
+                          &normalize_01,
+                          &drop_alpha)) {
+        return NULL;
+    }
+    
+    /* Call the C function */
+    Py_BEGIN_ALLOW_THREADS
+    result = decode_crop_to_chw_f32(
+        filename,
+        x0, y0, x1, y1,
+        out_channels,
+        (float *)out_ptr,
+        (int64_t)stride_c,
+        (int64_t)stride_y,
+        (int64_t)stride_x,
+        normalize_01,
+        drop_alpha
+    );
+    Py_END_ALLOW_THREADS
+    
+    if (result < 0) {
+        const char *error_msg;
+        switch (result) {
+            case -1: error_msg = "Failed to open file"; break;
+            case -2: error_msg = "Invalid BMP header"; break;
+            case -3: error_msg = "Unsupported BMP format (RLE compression)"; break;
+            case -4: error_msg = "Invalid crop coordinates"; break;
+            case -5: error_msg = "Unsupported bit depth"; break;
+            case -6: error_msg = "Memory allocation failed"; break;
+            case -7: error_msg = "File read error"; break;
+            default: error_msg = "Unknown error"; break;
+        }
+        PyErr_SetString(PyExc_RuntimeError, error_msg);
+        return NULL;
+    }
+    
+    Py_RETURN_NONE;
+}
+
+PyObject *
+PyImaging_BmpGetInfo(PyObject *self, PyObject *args) {
+    const char *filename;
+    int width, height, channels;
+    int result;
+    
+    if (!PyArg_ParseTuple(args, "s", &filename)) {
+        return NULL;
+    }
+    
+    result = bmp_get_info(filename, &width, &height, &channels);
+    
+    if (result < 0) {
+        const char *error_msg;
+        switch (result) {
+            case -1: error_msg = "Failed to open file"; break;
+            case -2: error_msg = "Invalid BMP header"; break;
+            case -5: error_msg = "Unsupported bit depth"; break;
+            default: error_msg = "Unknown error"; break;
+        }
+        PyErr_SetString(PyExc_RuntimeError, error_msg);
+        return NULL;
+    }
+    
+    return Py_BuildValue("(iii)", width, height, channels);
+}

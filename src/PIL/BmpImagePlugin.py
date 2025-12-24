@@ -750,6 +750,136 @@ def _save(im, fp, filename, bitmap_header=True):
 
 #
 # --------------------------------------------------------------------
+# Direct Decode API for PyTorch Integration
+#
+
+def decode_bmp_to_tensor(
+    filename,
+    box=None,
+    out_tensor=None,
+    normalize=True,
+    drop_alpha=True,
+    out_channels=3
+):
+    """
+    Decode a BMP image directly into a PyTorch tensor without intermediate copies.
+    
+    This function provides maximum performance for loading BMP images into PyTorch
+    by performing all operations (crop, normalize, CHW conversion) in a single pass
+    through the data, minimizing memory bandwidth usage.
+    
+    :param filename: Path to the BMP file.
+    :param box: Optional crop box as (left, upper, right, lower). If None, loads full image.
+    :param out_tensor: Optional pre-allocated PyTorch tensor (CHW, float32).
+                       If None, a new tensor will be created.
+    :param normalize: If True, normalize pixel values to [0, 1] range.
+    :param drop_alpha: If True, ignore alpha channel even if present in the image.
+    :param out_channels: Number of output channels (1, 3, or 4). Default is 3.
+    :returns: PyTorch tensor with shape (C, H, W) and dtype float32.
+    :raises RuntimeError: If the file cannot be decoded.
+    :raises ImportError: If PyTorch is not available.
+    
+    Example::
+    
+        import torch
+        from PIL.BmpImagePlugin import decode_bmp_to_tensor
+        
+        # Load full image
+        tensor = decode_bmp_to_tensor("image.bmp")
+        
+        # Load cropped region directly into pre-allocated tensor
+        out = torch.empty(3, 512, 512, dtype=torch.float32)
+        decode_bmp_to_tensor("image.bmp", box=(100, 100, 612, 612), out_tensor=out)
+        
+        # Load with custom settings
+        tensor = decode_bmp_to_tensor(
+            "image.bmp",
+            box=(0, 0, 256, 256),
+            normalize=False,  # Keep values in [0, 255]
+            out_channels=1    # Convert to grayscale
+        )
+    """
+    try:
+        import torch
+    except ImportError:
+        raise ImportError("PyTorch is required for decode_bmp_to_tensor")
+    
+    from PIL import _imaging
+    
+    # Get image info if needed
+    if box is None or out_tensor is None:
+        width, height, channels = _imaging.bmp_get_info(filename)
+    
+    # Determine crop region
+    if box is None:
+        x0, y0, x1, y1 = 0, 0, width, height
+    else:
+        x0, y0, x1, y1 = box
+    
+    crop_width = x1 - x0
+    crop_height = y1 - y0
+    
+    # Determine output channels
+    if out_channels is None:
+        out_channels = 3 if drop_alpha else min(channels, 4)
+    
+    # Create or validate output tensor
+    if out_tensor is None:
+        out_tensor = torch.empty(out_channels, crop_height, crop_width, dtype=torch.float32)
+    else:
+        # Validate shape
+        if out_tensor.dim() != 3:
+            raise ValueError(f"out_tensor must be 3D, got {out_tensor.dim()}D")
+        if out_tensor.shape[0] < out_channels:
+            raise ValueError(f"out_tensor has {out_tensor.shape[0]} channels, need {out_channels}")
+        if out_tensor.shape[1] < crop_height or out_tensor.shape[2] < crop_width:
+            raise ValueError(f"out_tensor too small: {out_tensor.shape[1:]} < ({crop_height}, {crop_width})")
+        if out_tensor.dtype != torch.float32:
+            raise ValueError(f"out_tensor must be float32, got {out_tensor.dtype}")
+        if out_tensor.device.type != 'cpu':
+            raise ValueError(f"out_tensor must be on CPU, got {out_tensor.device}")
+        if not out_tensor.is_contiguous():
+            raise ValueError("out_tensor must be contiguous")
+    
+    # Get data pointer and strides
+    out_ptr = out_tensor.data_ptr()
+    stride_c = out_tensor.stride(0)
+    stride_y = out_tensor.stride(1)
+    stride_x = out_tensor.stride(2)
+    
+    # Call C function
+    _imaging.bmp_decode_to_chw(
+        filename,
+        x0, y0, x1, y1,
+        out_channels,
+        out_ptr,
+        stride_c, stride_y, stride_x,
+        1 if normalize else 0,
+        1 if drop_alpha else 0
+    )
+    
+    return out_tensor
+
+
+def get_bmp_info(filename):
+    """
+    Get BMP image dimensions without loading the image data.
+    
+    :param filename: Path to the BMP file.
+    :returns: Tuple of (width, height, channels).
+    :raises RuntimeError: If the file cannot be read.
+    
+    Example::
+    
+        from PIL.BmpImagePlugin import get_bmp_info
+        width, height, channels = get_bmp_info("image.bmp")
+    """
+    from PIL import _imaging
+    return _imaging.bmp_get_info(filename)
+
+
+#
+# --------------------------------------------------------------------
 # Registry
 
 

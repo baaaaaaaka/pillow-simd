@@ -22,16 +22,41 @@
 #include <string.h>
 #include <stdint.h>
 
-/* Memory mapping for zero-copy file access */
+/* Memory mapping for zero-copy file access
+ * 
+ * NOTE: mmap can be slower on network filesystems (Lustre, NFS, CIFS).
+ * Set environment variable PILLOW_NO_MMAP=1 to disable mmap and use fread instead.
+ */
 #ifndef _WIN32
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#define USE_MMAP 1
+#define MMAP_AVAILABLE 1
 #else
-#define USE_MMAP 0
+#define MMAP_AVAILABLE 0
 #endif
+
+/* Runtime check for mmap - disabled by default for network filesystem compatibility
+ * Set PILLOW_USE_MMAP=1 to enable mmap (faster on local filesystems)
+ * mmap can be slower on Lustre, NFS, CIFS due to page fault latency */
+static int use_mmap_checked = 0;
+static int use_mmap_value = 0;  /* Default: OFF (fread) for Lustre/NFS compatibility */
+
+static int should_use_mmap(void) {
+#if !MMAP_AVAILABLE
+    return 0;
+#else
+    if (!use_mmap_checked) {
+        const char* env = getenv("PILLOW_USE_MMAP");
+        if (env && (env[0] == '1' || env[0] == 'y' || env[0] == 'Y')) {
+            use_mmap_value = 1;  /* Enable mmap only if explicitly requested */
+        }
+        use_mmap_checked = 1;
+    }
+    return use_mmap_value;
+#endif
+}
 
 /* SIMD headers for optimized processing */
 #ifdef __SSE2__
@@ -194,7 +219,7 @@ parse_bmp_header(FILE* fp, BmpInfo* info) {
     return 0;
 }
 
-#if USE_MMAP
+#if MMAP_AVAILABLE
 /**
  * Parse BMP header from memory-mapped data.
  * This is a zero-copy version that reads directly from mapped memory.
@@ -889,123 +914,114 @@ decode_crop_to_chw_f32(
     size_t data_offset;
     float scale;
     
-#if USE_MMAP
-    /* ================================================================
-     * MMAP-based implementation (Linux/macOS)
-     * Zero-copy: file data accessed directly from page cache
-     * ================================================================ */
+    /* Variables for both paths */
+    FILE* fp = NULL;
+    uint8_t* bulk_buffer = NULL;
+    long file_offset;
+    size_t bytes_to_read;
+    
+#if MMAP_AVAILABLE
+    /* Variables for mmap path */
     int fd = -1;
     struct stat st;
     uint8_t* mapped = NULL;
     size_t mapped_size = 0;
     const uint8_t* data_ptr;
     
-    /* Open file */
-    fd = open(filename, O_RDONLY);
-    if (fd < 0) {
-        return ERR_OPEN_FILE;
-    }
-    
-    /* Get file size */
-    if (fstat(fd, &st) < 0) {
-        close(fd);
-        return ERR_OPEN_FILE;
-    }
-    mapped_size = st.st_size;
-    
-    /* Memory map the entire file
-     * - MAP_PRIVATE: Copy-on-write (but we only read)
-     * - PROT_READ: Read-only access
-     * - Kernel will prefetch sequentially accessed pages */
-    mapped = (uint8_t*)mmap(NULL, mapped_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (mapped == MAP_FAILED) {
-        close(fd);
-        return ERR_MEMORY;
-    }
-    
-    /* Advise kernel about our access pattern */
-    madvise(mapped, mapped_size, MADV_SEQUENTIAL);
-    
-    /* Close fd - mmap keeps reference */
-    close(fd);
-    fd = -1;
-    
-    /* Parse header from mapped memory */
-    result = parse_bmp_header_from_memory(mapped, mapped_size, &info);
-    if (result < 0) {
-        munmap(mapped, mapped_size);
-        return result;
-    }
-    
-    /* Validate crop coordinates */
-    if (x0 < 0 || y0 < 0 || x1 <= x0 || y1 <= y0) {
-        munmap(mapped, mapped_size);
-        return ERR_INVALID_CROP;
-    }
-    if (x1 > info.width || y1 > info.height) {
-        munmap(mapped, mapped_size);
-        return ERR_INVALID_CROP;
-    }
-    
-    crop_width = x1 - x0;
-    crop_height = y1 - y0;
-    
-    if (out_channels < 1 || out_channels > 4) {
-        munmap(mapped, mapped_size);
-        return ERR_INVALID_CROP;
-    }
-    
-    scale = normalize_01 ? INV_255 : 1.0f;
-    
-    /* Calculate data offset */
-    if (info.direction == -1) {
-        file_start_row = info.height - y1;
-    } else {
-        file_start_row = y0;
-    }
-    data_offset = info.data_offset + (size_t)file_start_row * info.stride;
-    
-    /* Validate offset is within file */
-    if (data_offset + (size_t)crop_height * info.stride > mapped_size) {
-        munmap(mapped, mapped_size);
-        return ERR_READ;
-    }
-    
-    /* Point directly to the data we need - NO COPY! */
-    data_ptr = mapped + data_offset;
-    
-    /* Process directly from mmap'd memory */
-    process_all_rows(
-        data_ptr,
-        info.stride,
-        info.bits,
-        info.bytes_per_pixel,
-        x0,
-        crop_width,
-        crop_height,
-        info.direction,
-        out_channels,
-        out,
-        stride_c,
-        stride_y,
-        stride_x,
-        scale,
-        drop_alpha
-    );
-    
-    /* Unmap file */
-    munmap(mapped, mapped_size);
-    return 0;
-    
-#else
     /* ================================================================
-     * Fallback implementation for Windows (uses fread)
+     * RUNTIME CHOICE: mmap vs fread
+     * 
+     * mmap is faster on local filesystems but can be slower on network
+     * filesystems (Lustre, NFS, CIFS). Set PILLOW_NO_MMAP=1 to disable.
      * ================================================================ */
-    FILE* fp = NULL;
-    uint8_t* bulk_buffer = NULL;
-    long file_offset;
-    size_t bytes_to_read;
+    if (should_use_mmap()) {
+        /* MMAP path */
+        fd = open(filename, O_RDONLY);
+        if (fd < 0) {
+            return ERR_OPEN_FILE;
+        }
+        
+        if (fstat(fd, &st) < 0) {
+            close(fd);
+            return ERR_OPEN_FILE;
+        }
+        mapped_size = st.st_size;
+        
+        mapped = (uint8_t*)mmap(NULL, mapped_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (mapped == MAP_FAILED) {
+            close(fd);
+            return ERR_MEMORY;
+        }
+        
+        madvise(mapped, mapped_size, MADV_SEQUENTIAL);
+        close(fd);
+        
+        result = parse_bmp_header_from_memory(mapped, mapped_size, &info);
+        if (result < 0) {
+            munmap(mapped, mapped_size);
+            return result;
+        }
+        
+        if (x0 < 0 || y0 < 0 || x1 <= x0 || y1 <= y0) {
+            munmap(mapped, mapped_size);
+            return ERR_INVALID_CROP;
+        }
+        if (x1 > info.width || y1 > info.height) {
+            munmap(mapped, mapped_size);
+            return ERR_INVALID_CROP;
+        }
+        
+        crop_width = x1 - x0;
+        crop_height = y1 - y0;
+        
+        if (out_channels < 1 || out_channels > 4) {
+            munmap(mapped, mapped_size);
+            return ERR_INVALID_CROP;
+        }
+        
+        scale = normalize_01 ? INV_255 : 1.0f;
+        
+        if (info.direction == -1) {
+            file_start_row = info.height - y1;
+        } else {
+            file_start_row = y0;
+        }
+        data_offset = info.data_offset + (size_t)file_start_row * info.stride;
+        
+        if (data_offset + (size_t)crop_height * info.stride > mapped_size) {
+            munmap(mapped, mapped_size);
+            return ERR_READ;
+        }
+        
+        data_ptr = mapped + data_offset;
+        
+        process_all_rows(
+            data_ptr,
+            info.stride,
+            info.bits,
+            info.bytes_per_pixel,
+            x0,
+            crop_width,
+            crop_height,
+            info.direction,
+            out_channels,
+            out,
+            stride_c,
+            stride_y,
+            stride_x,
+            scale,
+            drop_alpha
+        );
+        
+        munmap(mapped, mapped_size);
+        return 0;
+    }
+#endif
     
+    /* ================================================================
+     * FREAD path (used when mmap disabled or on Windows)
+     * Better for network filesystems like Lustre, NFS, CIFS
+     * ================================================================ */
     fp = fopen(filename, "rb");
     if (!fp) {
         return ERR_OPEN_FILE;
@@ -1084,7 +1100,6 @@ decode_crop_to_chw_f32(
     
     free(bulk_buffer);
     return 0;
-#endif
 }
 
 /**

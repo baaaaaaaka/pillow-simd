@@ -829,22 +829,27 @@ def decode_bmp_to_tensor(
 
 def _decode_bmp_to_tensor_fast(filename, box, out_tensor, normalize, drop_alpha, out_channels, torch, _imaging):
     """Fast C-based decoding path."""
-    # Get image info if needed
-    if box is None or out_tensor is None:
-        width, height, channels = _imaging.bmp_get_info(filename)
+    # OPTIMIZATION: Only call bmp_get_info when absolutely necessary
+    # (when box is None and we need the full image dimensions)
+    # This avoids an extra file open/read/close cycle on Lustre
     
-    # Determine crop region
-    if box is None:
-        x0, y0, x1, y1 = 0, 0, width, height
-    else:
+    if box is not None:
+        # Box is provided, we know the crop dimensions without reading the file
         x0, y0, x1, y1 = box
-    
-    crop_width = x1 - x0
-    crop_height = y1 - y0
-    
-    # Determine output channels
-    if out_channels is None:
-        out_channels = 3 if drop_alpha else min(channels, 4)
+        crop_width = x1 - x0
+        crop_height = y1 - y0
+        # For out_channels, default to 3 (most common case)
+        # The C layer will handle the actual channel conversion
+        if out_channels is None:
+            out_channels = 3
+    else:
+        # No box, need to get full image dimensions
+        width, height, channels = _imaging.bmp_get_info(filename)
+        x0, y0, x1, y1 = 0, 0, width, height
+        crop_width = width
+        crop_height = height
+        if out_channels is None:
+            out_channels = 3 if drop_alpha else min(channels, 4)
     
     # Create or validate output tensor
     if out_tensor is None:

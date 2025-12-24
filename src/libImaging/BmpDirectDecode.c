@@ -137,33 +137,36 @@ static const float INV_255 = 1.0f / 255.0f;
  * Returns 0 on success, negative error code on failure.
  * 
  * OPTIMIZATION FOR NETWORK FS (Lustre/NFS):
- * Read entire header in ONE fread() call to minimize network round-trips.
- * BMP headers are at most 138 bytes (14 file header + 124 max DIB header).
+ * Read header + palette in ONE fread() call to minimize network round-trips.
+ * Max size: 14 (file header) + 124 (BITMAPV5HEADER) + 1024 (palette) = 1162 bytes
  */
 static int
 parse_bmp_header(FILE* fp, BmpInfo* info) {
-    uint8_t header[138];  /* Max header size: 14 (file) + 124 (BITMAPV5HEADER) */
+    /* Buffer for header + palette combined read
+     * 14 (file header) + 124 (max DIB) + 1024 (palette) = 1162 bytes */
+    uint8_t buffer[1162];
     size_t bytes_read;
     uint32_t header_size;
     int32_t height_raw;
     
-    /* OPTIMIZATION: Single read for entire header (reduces network round-trips)
-     * This is crucial for Lustre/NFS where each fread() may incur ~100-500μs RTT */
-    bytes_read = fread(header, 1, 138, fp);
+    /* OPTIMIZATION: Single read for header + palette (reduces network round-trips)
+     * This is crucial for Lustre/NFS where each fread() may incur ~100-500μs RTT
+     * We read the maximum possible size; for non-palette images, extra bytes are ignored */
+    bytes_read = fread(buffer, 1, sizeof(buffer), fp);
     if (bytes_read < 18) {
         return ERR_INVALID_HEADER;
     }
     
     /* Check BMP signature */
-    if (header[0] != 'B' || header[1] != 'M') {
+    if (buffer[0] != 'B' || buffer[1] != 'M') {
         return ERR_INVALID_HEADER;
     }
     
     /* Get data offset from file header */
-    info->data_offset = READ_U32_LE(header + 10);
+    info->data_offset = READ_U32_LE(buffer + 10);
     
     /* Get DIB header size */
-    header_size = READ_U32_LE(header + 14);
+    header_size = READ_U32_LE(buffer + 14);
     
     /* Validate we read enough for the header */
     if (bytes_read < 14 + header_size && header_size <= 124) {
@@ -173,17 +176,17 @@ parse_bmp_header(FILE* fp, BmpInfo* info) {
     /* Parse based on header type */
     if (header_size == 12) {
         /* OS/2 v1 header */
-        info->width = READ_U16_LE(header + 18);
-        info->height = READ_U16_LE(header + 20);
-        info->bits = READ_U16_LE(header + 24);
+        info->width = READ_U16_LE(buffer + 18);
+        info->height = READ_U16_LE(buffer + 20);
+        info->bits = READ_U16_LE(buffer + 24);
         info->compression = BMP_RAW;
         info->direction = -1;
     } else if (header_size >= 40) {
         /* Windows v3+ header */
-        info->width = READ_I32_LE(header + 18);
-        height_raw = READ_I32_LE(header + 22);
-        info->bits = READ_U16_LE(header + 28);
-        info->compression = READ_U32_LE(header + 30);
+        info->width = READ_I32_LE(buffer + 18);
+        height_raw = READ_I32_LE(buffer + 22);
+        info->bits = READ_U16_LE(buffer + 28);
+        info->compression = READ_U32_LE(buffer + 30);
         
         /* Handle negative height (top-down) */
         if (height_raw < 0) {
@@ -196,10 +199,10 @@ parse_bmp_header(FILE* fp, BmpInfo* info) {
         
         /* Parse BITFIELDS masks if needed */
         if (info->compression == BMP_BITFIELDS && header_size >= 56) {
-            info->r_mask = READ_U32_LE(header + 54);
-            info->g_mask = READ_U32_LE(header + 58);
-            info->b_mask = READ_U32_LE(header + 62);
-            info->a_mask = (header_size >= 60) ? READ_U32_LE(header + 66) : 0;
+            info->r_mask = READ_U32_LE(buffer + 54);
+            info->g_mask = READ_U32_LE(buffer + 58);
+            info->b_mask = READ_U32_LE(buffer + 62);
+            info->a_mask = (header_size >= 60) ? READ_U32_LE(buffer + 66) : 0;
         }
     } else {
         return ERR_INVALID_HEADER;
@@ -219,21 +222,20 @@ parse_bmp_header(FILE* fp, BmpInfo* info) {
     switch (info->bits) {
         case 8:
             info->channels = 1;
-            /* 8-bit BMP has a palette - read it for indexed color support */
+            /* 8-bit BMP has a palette - already in buffer from combined read */
             {
                 size_t palette_offset = 14 + header_size;
-                uint8_t palette_data[1024];  /* 256 entries × 4 bytes max */
                 size_t palette_entry_size = (header_size == 12) ? 3 : 4;
                 size_t palette_size = 256 * palette_entry_size;
                 
-                if (fseek(fp, palette_offset, SEEK_SET) != 0) {
-                    return ERR_READ;
-                }
-                if (fread(palette_data, 1, palette_size, fp) != palette_size) {
-                    return ERR_READ;
+                /* Verify we have the palette data in buffer */
+                if (bytes_read < palette_offset + palette_size) {
+                    return ERR_INVALID_HEADER;
                 }
                 
-                /* Convert palette to float (keep as 0-255 values, scale applied later) */
+                /* Convert palette to float (keep as 0-255 values, scale applied later)
+                 * Palette is already in buffer, no additional I/O needed! */
+                const uint8_t* palette_data = buffer + palette_offset;
                 for (int i = 0; i < 256; i++) {
                     const uint8_t* entry = palette_data + i * palette_entry_size;
                     info->palette_b[i] = (float)entry[0];
@@ -1226,6 +1228,9 @@ decode_crop_to_chw_f32(
     /* ================================================================
      * FREAD path (used when mmap disabled or on Windows)
      * Better for network filesystems like Lustre, NFS, CIFS
+     * 
+     * OPTIMIZATION: Use pread() for data read to eliminate fseek syscall
+     * pread() is atomic and combines seek+read into single syscall
      * ================================================================ */
     fp = fopen(filename, "rb");
     if (!fp) {
@@ -1271,6 +1276,22 @@ decode_crop_to_chw_f32(
     }
     
     file_offset = info.data_offset + (long)file_start_row * info.stride;
+    
+#ifndef _WIN32
+    /* OPTIMIZATION: Use pread() - single syscall instead of fseek + fread
+     * pread() atomically seeks and reads without modifying file position
+     * This saves 1 syscall per decode operation */
+    {
+        int fd = fileno(fp);
+        ssize_t bytes_actually_read = pread(fd, bulk_buffer, bytes_to_read, file_offset);
+        if (bytes_actually_read < 0 || (size_t)bytes_actually_read != bytes_to_read) {
+            free(bulk_buffer);
+            fclose(fp);
+            return ERR_READ;
+        }
+    }
+#else
+    /* Windows fallback: use fseek + fread */
     if (fseek(fp, file_offset, SEEK_SET) != 0) {
         free(bulk_buffer);
         fclose(fp);
@@ -1282,6 +1303,7 @@ decode_crop_to_chw_f32(
         fclose(fp);
         return ERR_READ;
     }
+#endif
     
     fclose(fp);
     

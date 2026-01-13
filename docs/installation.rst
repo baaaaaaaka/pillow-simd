@@ -413,7 +413,8 @@ Build Options
 
 Sample usage::
 
-    python3 -m pip install --upgrade Pillow --global-option="build_ext" --global-option="--enable-[feature]"
+    # In a virtualenv, run the build_ext flags directly:
+    python3 setup.py build_ext --enable-[feature] install
 
 Platform Support
 ----------------

@@ -57,6 +57,9 @@ class FpxImageFile(ImageFile.ImageFile):
         # to be a FlashPix file
 
         try:
+            # Keep a reference to the underlying file object we pass to olefile,
+            # so we can close it explicitly on close().
+            self._ole_fp = self.fp
             self.ole = olefile.OleFileIO(self.fp)
         except OSError as e:
             msg = "not an FPX file; invalid OLE file"
@@ -236,12 +239,19 @@ class FpxImageFile(ImageFile.ImageFile):
         return ImageFile.ImageFile.load(self)
 
     def close(self):
-        self.ole.close()
+        # olefile does not always close a file object it didn't open itself.
+        # Ensure the underlying FPX file is closed (see Tests/test_file_fpx.py).
+        try:
+            self.ole.close()
+        finally:
+            fp = getattr(self, "_ole_fp", None)
+            if fp is not None and not fp.closed:
+                fp.close()
         super().close()
 
     def __exit__(self, *args):
-        self.ole.close()
-        super().__exit__()
+        self.close()
+        return False
 
 
 #

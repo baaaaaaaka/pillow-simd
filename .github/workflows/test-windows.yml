@@ -39,16 +39,16 @@ jobs:
 
     steps:
     - name: Checkout Pillow
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Checkout cached dependencies
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         repository: python-pillow/pillow-depends
         path: winbuild\depends
 
     - name: Checkout extra test images
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         repository: python-pillow/test-images
         path: Tests\test-images
@@ -88,7 +88,7 @@ jobs:
 
     - name: Cache build
       id: build-cache
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: winbuild\build
         key:
@@ -190,7 +190,7 @@ jobs:
       shell: bash
 
     - name: Upload errors
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: failure()
       with:
         name: errors
@@ -235,7 +235,7 @@ jobs:
       shell: cmd
 
     - name: Upload wheel
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: "github.event_name != 'pull_request'"
       with:
         name: ${{ steps.wheel.outputs.dist }}
@@ -243,7 +243,7 @@ jobs:
 
     - name: Upload fribidi.dll
       if: "github.event_name != 'pull_request' && matrix.python-version == 3.11"
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: fribidi
         path: fribidi\*

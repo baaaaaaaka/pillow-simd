@@ -2,9 +2,9 @@
 
 .PHONY: clean
 clean:
-	python3 setup.py clean
 	rm src/PIL/*.so || true
 	rm -r build || true
+	rm -r src/Pillow_SIMD.egg-info || true
 	find . -name __pycache__ | xargs rm -r || true
 
 .PHONY: coverage
@@ -56,7 +56,7 @@ help:
 
 .PHONY: inplace
 inplace: clean
-	python3 -m pip install -e --global-option="build_ext" --global-option="--inplace" .
+	python3 -m pip install -e .
 
 .PHONY: install
 install:
@@ -65,7 +65,7 @@ install:
 
 .PHONY: install-coverage
 install-coverage:
-	CFLAGS="-coverage -Werror=implicit-function-declaration" python3 -m pip -v install --global-option="build_ext" .
+	CFLAGS="-coverage -Werror=implicit-function-declaration" python3 -m pip -v install .
 	python3 selftest.py
 
 .PHONY: debug
@@ -74,7 +74,7 @@ debug:
 # for our stuff, kills optimization, and redirects to dev null so we
 # see any build failures.
 	make clean > /dev/null
-	CFLAGS='-g -O0' python3 -m pip -v install --global-option="build_ext" . > /dev/null
+	CFLAGS='-g -O0' python3 -m pip -v install . > /dev/null
 
 .PHONY: release-test
 release-test:

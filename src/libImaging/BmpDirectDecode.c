@@ -236,7 +236,8 @@ parse_bmp_header(FILE* fp, BmpInfo* info) {
                 /* Convert palette to float (keep as 0-255 values, scale applied later)
                  * Palette is already in buffer, no additional I/O needed! */
                 const uint8_t* palette_data = buffer + palette_offset;
-                for (int i = 0; i < 256; i++) {
+                int i;
+                for (i = 0; i < 256; i++) {
                     const uint8_t* entry = palette_data + i * palette_entry_size;
                     info->palette_b[i] = (float)entry[0];
                     info->palette_g[i] = (float)entry[1];
@@ -357,7 +358,8 @@ parse_bmp_header_from_memory(const uint8_t* data, size_t data_size, BmpInfo* inf
                 }
                 
                 const uint8_t* palette_data = data + palette_offset;
-                for (int i = 0; i < 256; i++) {
+                int i;
+                for (i = 0; i < 256; i++) {
                     const uint8_t* entry = palette_data + i * palette_entry_size;
                     info->palette_b[i] = (float)entry[0];
                     info->palette_g[i] = (float)entry[1];
@@ -890,7 +892,8 @@ process_row_palette8_to_chw_f32_scalar(
     const float* __restrict palette_b,
     float scale
 ) {
-    for (int x = 0; x < width; x++) {
+    int x;
+    for (x = 0; x < width; x++) {
         uint8_t idx = src[x];
         out_r[x] = palette_r[idx] * scale;
         out_g[x] = palette_g[idx] * scale;
@@ -929,7 +932,8 @@ process_row_palette8_to_chw_f32(
     }
     
     /* Non-contiguous output: scalar with stride */
-    for (int x = 0; x < width; x++) {
+    int x;
+    for (x = 0; x < width; x++) {
         uint8_t idx = src[x];
         out_r[x * stride_x] = palette_r[idx] * scale;
         out_g[x * stride_x] = palette_g[idx] * scale;

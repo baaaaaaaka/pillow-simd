@@ -36,7 +36,7 @@ jobs:
           git config --global core.autocrlf input
 
       - name: Checkout Pillow
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Install Cygwin
         uses: cygwin/cygwin-install-action@v3
@@ -78,7 +78,7 @@ jobs:
           dirs: 'C:\cygwin\bin;C:\cygwin\lib\lapack'
 
       - name: pip cache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: 'C:\cygwin\home\runneradmin\.cache\pip'
           key: ${{ runner.os }}-cygwin-pip3.${{ matrix.python-minor-version }}-${{ hashFiles('.ci/install.sh') }}
@@ -113,7 +113,7 @@ jobs:
           dash.exe -c "mkdir -p Tests/errors"
 
       - name: Upload errors
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: errors

@@ -267,24 +267,24 @@ class BmpImageFile(ImageFile.ImageFile):
 
         # ---------------------------- Finally set the tile data for the plugin
         self.info["compression"] = file_info["compression"]
-        
+
         # Calculate stride (bytes per row including padding)
         stride = ((file_info["width"] * file_info["bits"] + 31) >> 3) & (~3)
-        
+
         args = [raw_mode]
         if decoder_name == "bmp_rle":
             args.append(file_info["compression"] == self.RLE4)
         else:
             args.append(stride)
         args.append(file_info["direction"])
-        
+
         # Store info for partial loading
         self._bmp_info = file_info
         self._data_offset = offset or self.fp.tell()
         self._raw_mode = raw_mode
         self._stride = stride
         self._decoder_name = decoder_name
-        
+
         self.tile = [
             (
                 decoder_name,
@@ -310,28 +310,29 @@ class BmpImageFile(ImageFile.ImageFile):
     def load_region(self, box):
         """
         Load only a region of the image, optimized for uncompressed BMP files.
-        
+
         This method provides significant performance improvements for large BMP files
         when only a small region is needed, by:
         - Reducing disk I/O (skipping unneeded rows)
         - Reducing memory usage (allocating only the crop region)
         - Reducing decode time (only decoding needed rows)
-        
+
         The implementation directly uses the C-layer raw decoder for maximum efficiency.
-        
+
         :param box: A 4-tuple (left, upper, right, lower) defining the region.
         :returns: An Image object containing only the requested region.
         :raises ValueError: If the box is invalid.
-        :raises OSError: If the image uses RLE compression (not supported for partial load).
-        
+        :raises OSError: If the image uses RLE compression (not supported for partial
+            load).
+
         Example usage::
-        
+
             with Image.open("large_image.bmp") as img:
                 # Only loads the specified region from disk
                 region = img.load_region((100, 100, 500, 500))
         """
         left, upper, right, lower = box
-        
+
         # Validate box
         if left < 0 or upper < 0:
             msg = "Box coordinates must be non-negative"
@@ -342,27 +343,26 @@ class BmpImageFile(ImageFile.ImageFile):
         if right > self.size[0] or lower > self.size[1]:
             msg = f"Box {box} exceeds image size {self.size}"
             raise ValueError(msg)
-        
+
         # Check if partial loading is supported
         if self._bmp_info is None:
             msg = "Image info not available for partial loading"
             raise OSError(msg)
-        
+
         compression = self._bmp_info.get("compression", -1)
         if compression in (self.RLE4, self.RLE8):
-            # RLE compression requires sequential decoding, fall back to full load + crop
+            # RLE compression requires sequential decoding; fall back to full load/crop
             self.load()
             return self.crop(box)
-        
+
         # For uncompressed BMP, we can do partial loading
-        crop_width = right - left
         crop_height = lower - upper
-        
-        # BMP stores rows from bottom to top (direction = -1) or top to bottom (direction = 1)
+
+        # BMP stores rows bottom->top (direction=-1) or top->bottom (direction=1)
         direction = self._bmp_info.get("direction", -1)
         img_height = self._bmp_info["height"]
         img_width = self._bmp_info["width"]
-        
+
         # Calculate which rows we need to read from the file
         if direction == -1:  # Bottom-up (most common)
             # Row 0 in file = bottom row of image (y = height - 1)
@@ -371,43 +371,31 @@ class BmpImageFile(ImageFile.ImageFile):
             file_start_row = img_height - lower
         else:  # Top-down
             file_start_row = upper
-        
+
         # Calculate file offset to skip unneeded rows
         row_offset = self._data_offset + file_start_row * self._stride
-        
+
         # Create a temporary image to hold the full-width rows we need
         # This allows us to use C-layer decoding directly
         temp_im = Image.new(self.mode, (img_width, crop_height))
-        
+
         # Copy palette if exists
         if self.mode == "P" and self.palette:
             temp_im.putpalette(self.palette)
-        
-        # Set up the tile for C-layer decoding
-        # tile format: (decoder_name, extents, offset, args)
-        # extents: (x0, y0, x1, y1) - region in the OUTPUT image to write to
-        # offset: position in file to start reading
-        # args: (rawmode, stride, direction)
-        tile = [(
-            "raw",
-            (0, 0, img_width, crop_height),  # Write to full width of temp image
-            row_offset,                       # Start reading from calculated offset
-            (self._raw_mode, self._stride, direction)
-        )]
-        
-        # Use ImageFile's tile-based loading mechanism (calls C decoder)
+
+        # Use the raw decoder directly (C layer does the heavy lifting)
         self.fp.seek(row_offset)
         decoder = Image._getdecoder(
             self.mode, "raw", (self._raw_mode, self._stride, direction)
         )
         decoder.setimage(temp_im.im, (0, 0, img_width, crop_height))
-        
+
         # Read and decode - let C layer handle the decoding
         bytes_to_read = crop_height * self._stride
         raw_data = ImageFile._safe_read(self.fp, bytes_to_read)
         decoder.decode(raw_data)
         decoder.cleanup()
-        
+
         # Now crop horizontally using C-layer crop (im.crop is implemented in C)
         if left == 0 and right == img_width:
             # No horizontal crop needed
@@ -419,30 +407,30 @@ class BmpImageFile(ImageFile.ImageFile):
     def load_region_c_optimized(self, box):
         """
         Load only a region of the image using C-layer partial decoding.
-        
+
         This is a more optimized version that uses a custom C decoder
         (raw_partial) to decode only the needed columns directly,
         avoiding the need for a second crop operation.
-        
+
         This method provides additional performance improvements over
         load_region() by:
         - Decoding only the needed columns (not full rows)
         - Eliminating the Python bytes object overhead
         - Eliminating the secondary crop operation
-        
+
         :param box: A 4-tuple (left, upper, right, lower) defining the region.
         :returns: An Image object containing only the requested region.
         :raises ValueError: If the box is invalid.
         :raises OSError: If the image uses RLE compression or unsupported bit depth.
-        
+
         Example usage::
-        
+
             with Image.open("large_image.bmp") as img:
                 # Uses C-layer optimized partial decoding
                 region = img.load_region_c_optimized((100, 100, 500, 500))
         """
         left, upper, right, lower = box
-        
+
         # Validate box
         if left < 0 or upper < 0:
             msg = "Box coordinates must be non-negative"
@@ -453,77 +441,79 @@ class BmpImageFile(ImageFile.ImageFile):
         if right > self.size[0] or lower > self.size[1]:
             msg = f"Box {box} exceeds image size {self.size}"
             raise ValueError(msg)
-        
+
         # Check if partial loading is supported
         if self._bmp_info is None:
             msg = "Image info not available for partial loading"
             raise OSError(msg)
-        
+
         compression = self._bmp_info.get("compression", -1)
         if compression in (self.RLE4, self.RLE8):
             # RLE compression requires sequential decoding, fall back
             return self.load_region(box)
-        
+
         bits = self._bmp_info["bits"]
         # C-layer partial decoding only works well for 8+ bit images
         if bits < 8:
             # Fall back to Python implementation for sub-byte pixels
             return self.load_region(box)
-        
+
         # For uncompressed BMP with 8+ bits, use C-layer partial decoding
         crop_width = right - left
         crop_height = lower - upper
-        
-        # BMP stores rows from bottom to top (direction = -1) or top to bottom (direction = 1)
+
+        # BMP stores rows bottom->top (direction=-1) or top->bottom (direction=1)
         direction = self._bmp_info.get("direction", -1)
         img_height = self._bmp_info["height"]
-        
+
         # Calculate which rows we need to read from the file
         if direction == -1:  # Bottom-up (most common)
             file_start_row = img_height - lower
         else:  # Top-down
             file_start_row = upper
-        
+
         # Calculate file offset to skip unneeded rows
         row_offset = self._data_offset + file_start_row * self._stride
-        
+
         # Calculate bytes to skip for left crop
         bytes_per_pixel = bits // 8
         skip_left_bytes = left * bytes_per_pixel
-        
+
         # Create output image with exact crop dimensions
         out_im = Image.new(self.mode, (crop_width, crop_height))
-        
+
         # Copy palette if exists
         if self.mode == "P" and self.palette:
             out_im.putpalette(self.palette)
-        
+
         # Seek to starting position
         self.fp.seek(row_offset)
-        
+
         # Use the new raw_partial decoder
         # Args: mode, rawmode, stride, ystep, skip_left
         decoder = Image._getdecoder(
-            self.mode, "raw_partial", 
-            (self._raw_mode, self._stride, direction, skip_left_bytes)
+            self.mode,
+            "raw_partial",
+            (self._raw_mode, self._stride, direction, skip_left_bytes),
         )
         decoder.setimage(out_im.im, (0, 0, crop_width, crop_height))
-        
+
         # Read and decode - still need to read full rows but decoder skips columns
         bytes_to_read = crop_height * self._stride
         raw_data = ImageFile._safe_read(self.fp, bytes_to_read)
         decoder.decode(raw_data)
         decoder.cleanup()
-        
+
         return out_im
 
     def crop(self, box=None, *, use_partial_load=None):
         """
         Returns a rectangular region from this image.
-        
-        This is an optimized version that uses partial loading for uncompressed BMP files.
+
+        This is an optimized version that uses partial loading for uncompressed BMP
+        files.
         For RLE-compressed files, it falls back to the standard crop behavior.
-        
+
         :param box: The crop rectangle, as a (left, upper, right, lower)-tuple.
         :param use_partial_load: Override the default partial loading behavior.
             - None (default): Use class-level ENABLE_PARTIAL_LOAD setting
@@ -531,35 +521,35 @@ class BmpImageFile(ImageFile.ImageFile):
             - False: Force traditional full-load + crop
         :rtype: :py:class:`~PIL.Image.Image`
         :returns: An :py:class:`~PIL.Image.Image` object.
-        
+
         Example::
-        
+
             # Use default behavior (auto-detect)
             region = img.crop((100, 100, 500, 500))
-            
+
             # Force traditional method (for benchmarking)
             region = img.crop((100, 100, 500, 500), use_partial_load=False)
-            
+
             # Force optimized method
             region = img.crop((100, 100, 500, 500), use_partial_load=True)
-            
+
             # Or disable globally for benchmarking:
             BmpImageFile.ENABLE_PARTIAL_LOAD = False
         """
         if box is None:
             return self.copy()
-        
+
         # Determine whether to use partial loading
         if use_partial_load is None:
             use_partial_load = self.ENABLE_PARTIAL_LOAD
-        
+
         # Check if we can use optimized partial loading
         if (
             use_partial_load
             and self._bmp_info is not None
             and self._bmp_info.get("compression", -1) not in (self.RLE4, self.RLE8)
             and self.fp is not None
-            and not getattr(self, '_loaded', False)
+            and not getattr(self, "_loaded", False)
         ):
             try:
                 # Use C-optimized version for best performance
@@ -570,7 +560,7 @@ class BmpImageFile(ImageFile.ImageFile):
                     raise
                 # Fall back to standard crop if partial load fails
                 pass
-        
+
         # Standard crop behavior
         self.load()
         self._loaded = True
@@ -753,23 +743,20 @@ def _save(im, fp, filename, bitmap_header=True):
 # Direct Decode API for PyTorch Integration
 #
 
+
 def decode_bmp_to_tensor(
-    filename,
-    box=None,
-    out_tensor=None,
-    normalize=True,
-    drop_alpha=True,
-    out_channels=3
+    filename, box=None, out_tensor=None, normalize=True, drop_alpha=True, out_channels=3
 ):
     """
     Decode a BMP image directly into a PyTorch tensor without intermediate copies.
-    
+
     This function provides maximum performance for loading BMP images into PyTorch
     by performing all operations (crop, normalize, CHW conversion) in a single pass
     through the data, minimizing memory bandwidth usage.
-    
+
     :param filename: Path to the BMP file.
-    :param box: Optional crop box as (left, upper, right, lower). If None, loads full image.
+    :param box: Optional crop box as (left, upper, right, lower). If None, loads
+        full image.
     :param out_tensor: Optional pre-allocated PyTorch tensor (CHW, float32).
                        If None, a new tensor will be created.
     :param normalize: If True, normalize pixel values to [0, 1] range.
@@ -778,19 +765,19 @@ def decode_bmp_to_tensor(
     :returns: PyTorch tensor with shape (C, H, W) and dtype float32.
     :raises RuntimeError: If the file cannot be decoded.
     :raises ImportError: If PyTorch is not available.
-    
+
     Example::
-    
+
         import torch
         from PIL.BmpImagePlugin import decode_bmp_to_tensor
-        
+
         # Load full image
         tensor = decode_bmp_to_tensor("image.bmp")
-        
+
         # Load cropped region directly into pre-allocated tensor
         out = torch.empty(3, 512, 512, dtype=torch.float32)
         decode_bmp_to_tensor("image.bmp", box=(100, 100, 612, 612), out_tensor=out)
-        
+
         # Load with custom settings
         tensor = decode_bmp_to_tensor(
             "image.bmp",
@@ -803,36 +790,53 @@ def decode_bmp_to_tensor(
         import torch
     except ImportError:
         raise ImportError("PyTorch is required for decode_bmp_to_tensor")
-    
+
     import numpy as np
-    from PIL import _imaging, Image
-    
-    # Try fast C path first (supports RGB, RGBA, Grayscale, and Palette with AVX2 Gather)
+
+    from PIL import _imaging
+
+    # Try fast C path first (RGB/RGBA/L/P; palette via AVX2 gather when available)
     # Fallback to Pillow if unsupported format (e.g., RLE compression)
     try:
         return _decode_bmp_to_tensor_fast(
-            filename, box, out_tensor, normalize, drop_alpha, out_channels, torch, _imaging
+            filename,
+            box,
+            out_tensor,
+            normalize,
+            drop_alpha,
+            out_channels,
+            torch,
+            _imaging,
         )
     except RuntimeError as e:
         # Check if this is an "unsupported format" error that we can fallback from
         # vs a genuine error (file not found, invalid crop) that should propagate
         error_msg = str(e).lower()
-        if 'unsupported' in error_msg or 'compression' in error_msg:
+        if "unsupported" in error_msg or "compression" in error_msg:
             # Fallback to slower but safer Pillow path for RLE, etc.
             return _decode_bmp_to_tensor_fallback(
-                filename, box, out_tensor, normalize, drop_alpha, out_channels, torch, np
+                filename,
+                box,
+                out_tensor,
+                normalize,
+                drop_alpha,
+                out_channels,
+                torch,
+                np,
             )
         else:
             # Re-raise other errors (file not found, invalid crop, etc.)
             raise
 
 
-def _decode_bmp_to_tensor_fast(filename, box, out_tensor, normalize, drop_alpha, out_channels, torch, _imaging):
+def _decode_bmp_to_tensor_fast(
+    filename, box, out_tensor, normalize, drop_alpha, out_channels, torch, _imaging
+):
     """Fast C-based decoding path."""
     # OPTIMIZATION: Only call bmp_get_info when absolutely necessary
     # (when box is None and we need the full image dimensions)
     # This avoids an extra file open/read/close cycle on Lustre
-    
+
     if box is not None:
         # Box is provided, we know the crop dimensions without reading the file
         x0, y0, x1, y1 = box
@@ -850,83 +854,96 @@ def _decode_bmp_to_tensor_fast(filename, box, out_tensor, normalize, drop_alpha,
         crop_height = height
         if out_channels is None:
             out_channels = 3 if drop_alpha else min(channels, 4)
-    
+
     # Create or validate output tensor
     if out_tensor is None:
-        out_tensor = torch.empty(out_channels, crop_height, crop_width, dtype=torch.float32)
+        out_tensor = torch.empty(
+            out_channels, crop_height, crop_width, dtype=torch.float32
+        )
     else:
         # Validate shape
         if out_tensor.dim() != 3:
             raise ValueError(f"out_tensor must be 3D, got {out_tensor.dim()}D")
         if out_tensor.shape[0] < out_channels:
-            raise ValueError(f"out_tensor has {out_tensor.shape[0]} channels, need {out_channels}")
+            raise ValueError(
+                f"out_tensor has {out_tensor.shape[0]} channels, need {out_channels}"
+            )
         if out_tensor.shape[1] < crop_height or out_tensor.shape[2] < crop_width:
-            raise ValueError(f"out_tensor too small: {out_tensor.shape[1:]} < ({crop_height}, {crop_width})")
+            actual_hw = out_tensor.shape[1:]
+            needed_hw = (crop_height, crop_width)
+            raise ValueError(f"out_tensor too small: {actual_hw} < {needed_hw}")
         if out_tensor.dtype != torch.float32:
             raise ValueError(f"out_tensor must be float32, got {out_tensor.dtype}")
-        if out_tensor.device.type != 'cpu':
+        if out_tensor.device.type != "cpu":
             raise ValueError(f"out_tensor must be on CPU, got {out_tensor.device}")
         if not out_tensor.is_contiguous():
             raise ValueError("out_tensor must be contiguous")
-    
+
     # Get data pointer and strides
     out_ptr = out_tensor.data_ptr()
     stride_c = out_tensor.stride(0)
     stride_y = out_tensor.stride(1)
     stride_x = out_tensor.stride(2)
-    
+
     # Call C function (may raise RuntimeError for unsupported formats)
     _imaging.bmp_decode_to_chw(
         filename,
-        x0, y0, x1, y1,
+        x0,
+        y0,
+        x1,
+        y1,
         out_channels,
         out_ptr,
-        stride_c, stride_y, stride_x,
+        stride_c,
+        stride_y,
+        stride_x,
         1 if normalize else 0,
-        1 if drop_alpha else 0
+        1 if drop_alpha else 0,
     )
-    
+
     return out_tensor
 
 
-def _decode_bmp_to_tensor_fallback(filename, box, out_tensor, normalize, drop_alpha, out_channels, torch, np):
+def _decode_bmp_to_tensor_fallback(
+    filename, box, out_tensor, normalize, drop_alpha, out_channels, torch, np
+):
     """Fallback path using Pillow for unsupported formats (RLE, etc.)."""
     from PIL import Image
-    
+
     with Image.open(filename) as img:
         # Apply crop if specified
         if box is not None:
             img = img.crop(box)
-        
+
         # Convert to RGB/RGBA if needed
-        if img.mode == 'P':
-            img = img.convert('RGBA' if 'transparency' in img.info else 'RGB')
-        elif img.mode == 'L':
+        if img.mode == "P":
+            img = img.convert("RGBA" if "transparency" in img.info else "RGB")
+        elif img.mode == "L":
             pass  # Keep grayscale
-        elif img.mode not in ('RGB', 'RGBA'):
-            img = img.convert('RGB')
-        
+        elif img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGB")
+
         # Convert to numpy array
         arr = np.array(img, dtype=np.float32)
-        
+
         # Normalize if requested
         if normalize:
             arr = arr / 255.0
-        
+
         # Handle grayscale
         if arr.ndim == 2:
             arr = arr[:, :, np.newaxis]
-        
+
         # Transpose to CHW
         arr = arr.transpose(2, 0, 1)
-        
+
         # Handle channels
         if out_channels is None:
             out_channels = 3 if drop_alpha else arr.shape[0]
-        
+
         if drop_alpha and arr.shape[0] == 4:
             arr = arr[:3]
-        
+
         # Ensure correct number of channels
         if arr.shape[0] < out_channels:
             # Expand grayscale to RGB if needed
@@ -934,7 +951,7 @@ def _decode_bmp_to_tensor_fallback(filename, box, out_tensor, normalize, drop_al
                 arr = np.repeat(arr, 3, axis=0)
         elif arr.shape[0] > out_channels:
             arr = arr[:out_channels]
-        
+
         # Create or fill output tensor
         if out_tensor is None:
             return torch.from_numpy(arr.copy())
@@ -944,9 +961,9 @@ def _decode_bmp_to_tensor_fallback(filename, box, out_tensor, normalize, drop_al
                 raise ValueError(f"out_tensor must be 3D, got {out_tensor.dim()}D")
             if out_tensor.dtype != torch.float32:
                 raise ValueError(f"out_tensor must be float32, got {out_tensor.dtype}")
-            if out_tensor.device.type != 'cpu':
+            if out_tensor.device.type != "cpu":
                 raise ValueError(f"out_tensor must be on CPU, got {out_tensor.device}")
-            
+
             h, w = arr.shape[1], arr.shape[2]
             c = min(arr.shape[0], out_tensor.shape[0])
             out_tensor[:c, :h, :w] = torch.from_numpy(arr[:c])
@@ -956,17 +973,18 @@ def _decode_bmp_to_tensor_fallback(filename, box, out_tensor, normalize, drop_al
 def get_bmp_info(filename):
     """
     Get BMP image dimensions without loading the image data.
-    
+
     :param filename: Path to the BMP file.
     :returns: Tuple of (width, height, channels).
     :raises RuntimeError: If the file cannot be read.
-    
+
     Example::
-    
+
         from PIL.BmpImagePlugin import get_bmp_info
         width, height, channels = get_bmp_info("image.bmp")
     """
     from PIL import _imaging
+
     return _imaging.bmp_get_info(filename)
 
 

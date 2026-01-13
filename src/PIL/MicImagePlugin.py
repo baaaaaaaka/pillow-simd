@@ -43,6 +43,9 @@ class MicImageFile(TiffImagePlugin.TiffImageFile):
         # to be a Microsoft Image Composer file
 
         try:
+            # Keep a reference to the underlying file object we pass to olefile,
+            # so we can close it explicitly on close().
+            self._ole_fp = self.fp
             self.ole = olefile.OleFileIO(self.fp)
         except OSError as e:
             msg = "not an MIC file; invalid OLE file"
@@ -90,12 +93,19 @@ class MicImageFile(TiffImagePlugin.TiffImageFile):
         return self.frame
 
     def close(self):
-        self.ole.close()
+        # olefile does not always close a file object it didn't open itself.
+        # Ensure the underlying MIC file is closed (see Tests/test_file_mic.py).
+        try:
+            self.ole.close()
+        finally:
+            fp = getattr(self, "_ole_fp", None)
+            if fp is not None and not fp.closed:
+                fp.close()
         super().close()
 
     def __exit__(self, *args):
-        self.ole.close()
-        super().__exit__()
+        self.close()
+        return False
 
 
 #

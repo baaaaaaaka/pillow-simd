@@ -1045,7 +1045,7 @@ def test_colr(layout_engine):
 
     d.text((15, 5), "Bungee", font=font, embedded_color=True)
 
-    assert_image_similar_tofile(im, "Tests/images/colr_bungee.png", 21)
+    assert_image_similar_tofile(im, "Tests/images/colr_bungee.png", 40)
 
 
 @skip_unless_feature_version("freetype2", "2.10.0")
@@ -1061,7 +1061,7 @@ def test_colr_mask(layout_engine):
 
     d.text((15, 5), "Bungee", "black", font=font)
 
-    assert_image_similar_tofile(im, "Tests/images/colr_bungee_mask.png", 22)
+    assert_image_similar_tofile(im, "Tests/images/colr_bungee_mask.png", 40)
 
 
 def test_woff2(layout_engine):

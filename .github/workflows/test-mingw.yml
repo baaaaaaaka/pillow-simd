@@ -45,7 +45,7 @@ jobs:
 
     steps:
       - name: Checkout Pillow
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up shell
         run: echo "C:\msys64\usr\bin\" >> $env:GITHUB_PATH
@@ -53,6 +53,10 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # Keep MSYS2 packages up-to-date (helps avoid transient mirror/key issues)
+          pacman -Syu --noconfirm
+          pacman -Syu --noconfirm
+
           pacman -S --noconfirm \
               ${{ matrix.package }}-freetype \
               ${{ matrix.package }}-gcc \
@@ -64,11 +68,12 @@ jobs:
               ${{ matrix.package }}-libtiff \
               ${{ matrix.package }}-libwebp \
               ${{ matrix.package }}-openjpeg2 \
-              ${{ matrix.package }}-python3-cffi \
-              ${{ matrix.package }}-python3-numpy \
-              ${{ matrix.package }}-python3-olefile \
-              ${{ matrix.package }}-python3-pip \
-              ${{ matrix.package }}-python3-setuptools
+              ${{ matrix.package }}-python \
+              ${{ matrix.package }}-python-cffi \
+              ${{ matrix.package }}-python-numpy \
+              ${{ matrix.package }}-python-olefile \
+              ${{ matrix.package }}-python-pip \
+              ${{ matrix.package }}-python-setuptools
 
           if [ ${{ matrix.package }} == "mingw-w64-x86_64" ]; then
               pacman -S --noconfirm \
@@ -80,7 +85,7 @@ jobs:
           pushd depends && ./install_extra_test_images.sh && popd
 
       - name: Build Pillow
-        run: CFLAGS="-coverage" python3 -m pip install --global-option="build_ext" .
+        run: CFLAGS="-coverage" python3 -m pip install .
 
       - name: Test Pillow
         run: |

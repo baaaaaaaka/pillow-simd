@@ -63,19 +63,21 @@ jobs:
 
     - name: Docker build
       run: |
-        # The Pillow user in the docker container is UID 1000
-        sudo chown -R 1000 $GITHUB_WORKSPACE
+        # The Pillow user in the docker container is UID 1001
+        sudo chown -R 1001 $GITHUB_WORKSPACE
         docker run --name pillow_container  -v $GITHUB_WORKSPACE:/Pillow pythonpillow/${{ matrix.docker }}:${{ matrix.dockerTag }}
         sudo chown -R runner $GITHUB_WORKSPACE
 
     - name: After success
       run: |
-        PATH="$PATH:~/.local/bin"
         docker start pillow_container
+        sudo docker cp pillow_container:/Pillow /Pillow
+        sudo chown -R runner /Pillow
         pil_path=`docker exec pillow_container /vpy3/bin/python -c 'import os, PIL;print(os.path.realpath(os.path.dirname(PIL.__file__)))'`
         docker stop pillow_container
         sudo mkdir -p $pil_path
         sudo cp src/PIL/*.py $pil_path
+        cd /Pillow
         .ci/after_success.sh
       env:
         MATRIX_DOCKER: ${{ matrix.docker }}

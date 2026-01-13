@@ -53,10 +53,6 @@ jobs:
 
       - name: Install dependencies
         run: |
-          # Keep MSYS2 packages up-to-date (helps avoid transient mirror/key issues)
-          pacman -Syu --noconfirm
-          pacman -Syu --noconfirm
-
           pacman -S --noconfirm \
               ${{ matrix.package }}-freetype \
               ${{ matrix.package }}-gcc \

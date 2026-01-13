@@ -138,18 +138,25 @@ deps = {
         "bins": ["cjpeg.exe", "djpeg.exe"],
     },
     "zlib": {
-        "url": "https://zlib.net/zlib1213.zip",
-        "filename": "zlib1213.zip",
-        "dir": "zlib-1.2.13",
-        "license": "README",
-        "license_pattern": "Copyright notice:\n\n(.+)$",
+        # zlib.net frequently removes old versioned archives; use zlib-ng in
+        # ZLIB_COMPAT mode (matches upstream Pillow winbuild).
+        "url": "https://github.com/zlib-ng/zlib-ng/archive/refs/tags/2.3.2.tar.gz",
+        "filename": "zlib-ng-2.3.2.tar.gz",
+        "dir": "zlib-ng-2.3.2",
+        "license": "LICENSE.md",
+        "patch": {
+            r"CMakeLists.txt": {
+                # Ensure the produced static lib is named zlib.lib
+                "set_target_properties(zlib-ng PROPERTIES OUTPUT_NAME zlibstatic${{SUFFIX}})": "set_target_properties(zlib-ng PROPERTIES OUTPUT_NAME zlib)",  # noqa: E501
+            },
+        },
         "build": [
-            cmd_nmake(r"win32\Makefile.msc", "clean"),
-            cmd_nmake(r"win32\Makefile.msc", "zlib.lib"),
-            cmd_copy("zlib.lib", "z.lib"),
+            *cmds_cmake(
+                "zlib-ng", "-DBUILD_SHARED_LIBS:BOOL=OFF", "-DZLIB_COMPAT:BOOL=ON"
+            ),
         ],
         "headers": [r"z*.h"],
-        "libs": [r"*.lib"],
+        "libs": [r"zlib.lib"],
     },
     "xz": {
         "url": SF_PROJECTS + "/lzmautils/files/xz-5.4.2.tar.gz/download",

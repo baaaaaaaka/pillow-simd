@@ -61,11 +61,12 @@ jobs:
               ${{ matrix.package }}-libtiff \
               ${{ matrix.package }}-libwebp \
               ${{ matrix.package }}-openjpeg2 \
-              ${{ matrix.package }}-python3-cffi \
-              ${{ matrix.package }}-python3-numpy \
-              ${{ matrix.package }}-python3-olefile \
-              ${{ matrix.package }}-python3-pip \
-              ${{ matrix.package }}-python3-setuptools
+              ${{ matrix.package }}-python \
+              ${{ matrix.package }}-python-cffi \
+              ${{ matrix.package }}-python-numpy \
+              ${{ matrix.package }}-python-olefile \
+              ${{ matrix.package }}-python-pip \
+              ${{ matrix.package }}-python-setuptools
 
           if [ ${{ matrix.package }} == "mingw-w64-x86_64" ]; then
               pacman -S --noconfirm \
@@ -77,7 +78,7 @@ jobs:
           pushd depends && ./install_extra_test_images.sh && popd
 
       - name: Build Pillow
-        run: CFLAGS="-coverage" python3 -m pip install --global-option="build_ext" .
+        run: CFLAGS="-coverage" python3 -m pip install .
 
       - name: Test Pillow
         run: |

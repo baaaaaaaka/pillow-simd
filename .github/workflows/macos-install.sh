@@ -13,8 +13,8 @@ python3 -m pip install -U pytest-cov
 python3 -m pip install -U pytest-timeout
 python3 -m pip install pyroma
 
-# TODO Remove condition when NumPy supports 3.12
-if ! [ "$GHA_PYTHON_VERSION" == "3.12-dev" ]; then python3 -m pip install numpy ; fi
+# NumPy is required for bmp partial load tests
+python3 -m pip install numpy
 
 # extra test images
 pushd depends && ./install_extra_test_images.sh && popd

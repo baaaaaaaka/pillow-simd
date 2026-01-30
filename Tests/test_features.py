@@ -34,7 +34,12 @@ def test_version():
         else:
             assert function(name) == version
             if name != "PIL":
-                assert version is None or re.search(r"\d+(\.\d+)*$", version)
+                if name == "zlib":
+                    assert version is None or re.search(
+                        r"\d+(\.\d+)*(\.zlib-ng)?$", version
+                    )
+                else:
+                    assert version is None or re.search(r"\d+(\.\d+)*$", version)
 
     for module in features.modules:
         test(module, features.version_module)

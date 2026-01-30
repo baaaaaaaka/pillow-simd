@@ -711,7 +711,7 @@ PyImaging_DrawWmf(PyObject *self, PyObject *args) {
     HDC dc;
     RECT rect;
     PyObject *buffer = NULL;
-    char *ptr;
+    void *ptr;
 
     char *data;
     Py_ssize_t datasize;
@@ -791,7 +791,9 @@ PyImaging_DrawWmf(PyObject *self, PyObject *args) {
 
     GdiFlush();
 
-    buffer = PyBytes_FromStringAndSize(ptr, height * ((width * 3 + 3) & -4));
+    buffer = PyBytes_FromStringAndSize(
+        (char *)ptr, height * ((width * 3 + 3) & -4)
+    );
 
 error:
     DeleteEnhMetaFile(meta);

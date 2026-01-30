@@ -63,10 +63,13 @@ jobs:
 
     - name: Docker build
       run: |
-        # The Pillow user in the docker container is UID 1001
-        sudo chown -R 1001 $GITHUB_WORKSPACE
+        # The Pillow user UID differs between docker images (1000/1001).
+        # Detect it to avoid permission issues when building in a bind mount.
+        pillow_uid=$(docker run --rm pythonpillow/${{ matrix.docker }}:${{ matrix.dockerTag }} sh -lc 'id -u pillow')
+        pillow_gid=$(docker run --rm pythonpillow/${{ matrix.docker }}:${{ matrix.dockerTag }} sh -lc 'id -g pillow')
+        sudo chown -R "$pillow_uid:$pillow_gid" "$GITHUB_WORKSPACE"
         docker run --name pillow_container  -v $GITHUB_WORKSPACE:/Pillow pythonpillow/${{ matrix.docker }}:${{ matrix.dockerTag }}
-        sudo chown -R runner $GITHUB_WORKSPACE
+        sudo chown -R runner "$GITHUB_WORKSPACE"
 
     - name: After success
       run: |

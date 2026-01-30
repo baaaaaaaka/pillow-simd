@@ -193,7 +193,7 @@ jobs:
       uses: actions/upload-artifact@v4
       if: failure()
       with:
-        name: errors
+        name: errors-${{ matrix.python-version }}-${{ matrix.architecture }}
         path: Tests/errors
 
     - name: After success
@@ -238,14 +238,14 @@ jobs:
       uses: actions/upload-artifact@v4
       if: "github.event_name != 'pull_request'"
       with:
-        name: ${{ steps.wheel.outputs.dist }}
+        name: ${{ steps.wheel.outputs.dist }}-${{ matrix.python-version }}-${{ matrix.architecture }}
         path: dist\*.whl
 
     - name: Upload fribidi.dll
       if: "github.event_name != 'pull_request' && matrix.python-version == 3.11"
       uses: actions/upload-artifact@v4
       with:
-        name: fribidi
+        name: fribidi-${{ matrix.architecture }}
         path: fribidi\*
 
   success:
